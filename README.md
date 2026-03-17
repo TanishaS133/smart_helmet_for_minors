@@ -1,1 +1,1 @@
-# smart_helmet_for_minors
+# smart_helmet_for_miners
