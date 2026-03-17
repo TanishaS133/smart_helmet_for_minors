@@ -1,0 +1,453 @@
+{
+  "name": "Smart Miner Helmet Safety System",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "smart-helmet-data",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "webhook-entry",
+      "name": "Helmet Data Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1,
+      "position": [240, 400],
+      "webhookId": "smart-helmet-webhook"
+    },
+    {
+      "parameters": {
+        "respondWith": "text",
+        "responseBody": "{ \"status\": \"received\", \"timestamp\": \"{{ $now }}\" }",
+        "options": {
+          "responseCode": 200,
+          "responseHeaders": {
+            "entries": [
+              { "name": "Content-Type", "value": "application/json" }
+            ]
+          }
+        }
+      },
+      "id": "respond-ack",
+      "name": "Acknowledge Receipt",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [460, 220]
+    },
+    {
+      "parameters": {
+        "jsCode": "const body = $input.first().json.body || $input.first().json;\n\nconst data = {\n  minerId: body.miner_id || 'UNKNOWN',\n  helmetId: body.helmet_id || 'H-001',\n  timestamp: body.timestamp || new Date().toISOString(),\n  location: body.location || 'Zone-Unknown',\n  sensors: {\n    methane: parseFloat(body.methane_ppm || 0),\n    co: parseFloat(body.co_ppm || 0),\n    temperature: parseFloat(body.temperature_c || 0),\n    shockDetected: body.shock_detected === true || body.shock_detected === 'true',\n    shockForce: parseFloat(body.shock_force_g || 0),\n    pulseRate: parseFloat(body.pulse_bpm || 0),\n    emergencyButton: body.emergency_button === true || body.emergency_button === 'true'\n  }\n};\n\n// Evaluate alert conditions\nconst alerts = [];\n\nif (data.sensors.methane > 1000) alerts.push({ type: 'GAS_CRITICAL', sensor: 'Methane', value: data.sensors.methane, unit: 'ppm', threshold: 1000 });\nelse if (data.sensors.methane > 500) alerts.push({ type: 'GAS_WARNING', sensor: 'Methane', value: data.sensors.methane, unit: 'ppm', threshold: 500 });\n\nif (data.sensors.co > 50) alerts.push({ type: 'GAS_CRITICAL', sensor: 'Carbon Monoxide', value: data.sensors.co, unit: 'ppm', threshold: 50 });\nelse if (data.sensors.co > 25) alerts.push({ type: 'GAS_WARNING', sensor: 'Carbon Monoxide', value: data.sensors.co, unit: 'ppm', threshold: 25 });\n\nif (data.sensors.temperature > 45) alerts.push({ type: 'HEAT_CRITICAL', sensor: 'Temperature', value: data.sensors.temperature, unit: '°C', threshold: 45 });\nelse if (data.sensors.temperature > 38) alerts.push({ type: 'HEAT_WARNING', sensor: 'Temperature', value: data.sensors.temperature, unit: '°C', threshold: 38 });\n\nif (data.sensors.shockDetected) alerts.push({ type: 'SHOCK_DETECTED', sensor: 'Shock', value: data.sensors.shockForce, unit: 'g', threshold: 0 });\n\nif (data.sensors.pulseRate > 120) alerts.push({ type: 'PULSE_HIGH', sensor: 'Pulse', value: data.sensors.pulseRate, unit: 'bpm', threshold: 120 });\nelse if (data.sensors.pulseRate < 50 && data.sensors.pulseRate > 0) alerts.push({ type: 'PULSE_LOW', sensor: 'Pulse', value: data.sensors.pulseRate, unit: 'bpm', threshold: 50 });\n\nif (data.sensors.emergencyButton) alerts.push({ type: 'EMERGENCY_MANUAL', sensor: 'Emergency Button', value: 1, unit: 'triggered', threshold: 0 });\n\nconst hasCritical = alerts.some(a => a.type.includes('CRITICAL') || a.type === 'EMERGENCY_MANUAL' || a.type === 'SHOCK_DETECTED');\nconst hasWarning = alerts.some(a => a.type.includes('WARNING'));\n\nreturn [{ json: { ...data, alerts, hasCritical, hasWarning, hasAlerts: alerts.length > 0 } }];"
+      },
+      "id": "parse-sensor-data",
+      "name": "Parse & Evaluate Sensor Data",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [680, 400]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": { "caseSensitive": true, "leftValue": "", "typeValidation": "strict" },
+          "conditions": [
+            {
+              "id": "critical-check",
+              "leftValue": "={{ $json.hasCritical }}",
+              "rightValue": true,
+              "operator": { "type": "boolean", "operation": "equals" }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "check-critical",
+      "name": "Is Critical Alert?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [920, 300]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": { "caseSensitive": true, "leftValue": "", "typeValidation": "strict" },
+          "conditions": [
+            {
+              "id": "warning-check",
+              "leftValue": "={{ $json.hasWarning }}",
+              "rightValue": true,
+              "operator": { "type": "boolean", "operation": "equals" }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "check-warning",
+      "name": "Is Warning Alert?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [920, 560]
+    },
+    {
+      "parameters": {
+        "jsCode": "const data = $input.first().json;\nconst criticalAlerts = data.alerts.filter(a => a.type.includes('CRITICAL') || a.type === 'EMERGENCY_MANUAL' || a.type === 'SHOCK_DETECTED');\nconst alertSummary = criticalAlerts.map(a => `${a.sensor}: ${a.value}${a.unit}`).join(', ');\n\nreturn [{\n  json: {\n    ...data,\n    smsMessage: `🚨 CRITICAL ALERT - Miner ${data.minerId} | Helmet ${data.helmetId} | Location: ${data.location} | Issues: ${alertSummary} | Time: ${data.timestamp}`,\n    emailSubject: `[CRITICAL] Smart Helmet Alert - Miner ${data.minerId}`,\n    emailBody: `CRITICAL SAFETY ALERT\\n\\nMiner ID: ${data.minerId}\\nHelmet ID: ${data.helmetId}\\nLocation: ${data.location}\\nTimestamp: ${data.timestamp}\\n\\nCritical Issues Detected:\\n${criticalAlerts.map(a => `- ${a.sensor}: ${a.value} ${a.unit} (Threshold: ${a.threshold} ${a.unit})`).join('\\n')}\\n\\nAll Sensor Readings:\\n- Methane: ${data.sensors.methane} ppm\\n- CO: ${data.sensors.co} ppm\\n- Temperature: ${data.sensors.temperature} °C\\n- Pulse Rate: ${data.sensors.pulseRate} bpm\\n- Shock Detected: ${data.sensors.shockDetected}\\n- Emergency Button: ${data.sensors.emergencyButton}\\n\\nImmediate action required. Initiate evacuation protocol if needed.`,\n    incidentSeverity: 'CRITICAL'\n  }\n}];"
+      },
+      "id": "format-critical-alert",
+      "name": "Format Critical Alert",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1160, 200]
+    },
+    {
+      "parameters": {
+        "jsCode": "const data = $input.first().json;\nconst warningAlerts = data.alerts.filter(a => a.type.includes('WARNING'));\nconst alertSummary = warningAlerts.map(a => `${a.sensor}: ${a.value}${a.unit}`).join(', ');\n\nreturn [{\n  json: {\n    ...data,\n    smsMessage: `⚠️ WARNING - Miner ${data.minerId} | Location: ${data.location} | Issues: ${alertSummary}`,\n    emailSubject: `[WARNING] Smart Helmet Alert - Miner ${data.minerId}`,\n    emailBody: `SAFETY WARNING\\n\\nMiner ID: ${data.minerId}\\nHelmet ID: ${data.helmetId}\\nLocation: ${data.location}\\nTimestamp: ${data.timestamp}\\n\\nWarning Issues:\\n${warningAlerts.map(a => `- ${a.sensor}: ${a.value} ${a.unit} (Threshold: ${a.threshold} ${a.unit})`).join('\\n')}\\n\\nPlease monitor the situation closely.`,\n    incidentSeverity: 'WARNING'\n  }\n}];"
+      },
+      "id": "format-warning-alert",
+      "name": "Format Warning Alert",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1160, 480]
+    },
+    {
+      "parameters": {
+        "url": "https://api.twilio.com/2010-04-01/Accounts/YOUR_ACCOUNT_SID/Messages.json",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpBasicAuth",
+        "sendBody": true,
+        "contentType": "form-urlencoded",
+        "bodyParameters": {
+          "parameters": [
+            { "name": "To", "value": "+91SUPERVISOR_PHONE" },
+            { "name": "From", "value": "+1YOUR_TWILIO_NUMBER" },
+            { "name": "Body", "value": "={{ $json.smsMessage }}" }
+          ]
+        },
+        "options": {}
+      },
+      "id": "send-critical-sms",
+      "name": "Send Critical SMS (Twilio)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [1420, 120]
+    },
+    {
+      "parameters": {
+        "fromEmail": "alerts@minersafety.com",
+        "toEmail": "supervisor@miningcompany.com",
+        "subject": "={{ $json.emailSubject }}",
+        "emailType": "text",
+        "text": "={{ $json.emailBody }}",
+        "options": {}
+      },
+      "id": "send-critical-email",
+      "name": "Send Critical Email",
+      "type": "n8n-nodes-base.emailSend",
+      "typeVersion": 2,
+      "position": [1420, 280]
+    },
+    {
+      "parameters": {
+        "url": "https://api.twilio.com/2010-04-01/Accounts/YOUR_ACCOUNT_SID/Messages.json",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpBasicAuth",
+        "sendBody": true,
+        "contentType": "form-urlencoded",
+        "bodyParameters": {
+          "parameters": [
+            { "name": "To", "value": "+91SUPERVISOR_PHONE" },
+            { "name": "From", "value": "+1YOUR_TWILIO_NUMBER" },
+            { "name": "Body", "value": "={{ $json.smsMessage }}" }
+          ]
+        },
+        "options": {}
+      },
+      "id": "send-warning-sms",
+      "name": "Send Warning SMS (Twilio)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [1420, 440]
+    },
+    {
+      "parameters": {
+        "fromEmail": "alerts@minersafety.com",
+        "toEmail": "supervisor@miningcompany.com",
+        "subject": "={{ $json.emailSubject }}",
+        "emailType": "text",
+        "text": "={{ $json.emailBody }}",
+        "options": {}
+      },
+      "id": "send-warning-email",
+      "name": "Send Warning Email",
+      "type": "n8n-nodes-base.emailSend",
+      "typeVersion": 2,
+      "position": [1420, 580]
+    },
+    {
+      "parameters": {
+        "jsCode": "const data = $input.first().json;\nconst severity = data.incidentSeverity || (data.hasAlerts ? 'WARNING' : 'NORMAL');\n\nreturn [{\n  json: {\n    incident_id: `INC-${Date.now()}`,\n    miner_id: data.minerId,\n    helmet_id: data.helmetId,\n    timestamp: data.timestamp,\n    location: data.location,\n    severity: severity,\n    alerts: JSON.stringify(data.alerts),\n    methane_ppm: data.sensors.methane,\n    co_ppm: data.sensors.co,\n    temperature_c: data.sensors.temperature,\n    shock_detected: data.sensors.shockDetected,\n    shock_force_g: data.sensors.shockForce,\n    pulse_bpm: data.sensors.pulseRate,\n    emergency_button: data.sensors.emergencyButton,\n    status: 'OPEN'\n  }\n}];"
+      },
+      "id": "format-incident-log",
+      "name": "Format Incident Log",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1160, 720]
+    },
+    {
+      "parameters": {
+        "operation": "append",
+        "documentId": { "mode": "id", "value": "YOUR_GOOGLE_SHEET_ID" },
+        "sheetName": { "mode": "name", "value": "IncidentLog" },
+        "columns": {
+          "mappingMode": "autoMapInputData",
+          "value": {},
+          "matchingColumns": [],
+          "schema": []
+        },
+        "options": {}
+      },
+      "id": "log-to-sheets",
+      "name": "Log to Google Sheets",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4,
+      "position": [1420, 720]
+    },
+    {
+      "parameters": {
+        "operation": "append",
+        "documentId": { "mode": "id", "value": "YOUR_GOOGLE_SHEET_ID" },
+        "sheetName": { "mode": "name", "value": "SensorReadings" },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "timestamp": "={{ $json.timestamp }}",
+            "miner_id": "={{ $json.minerId }}",
+            "helmet_id": "={{ $json.helmetId }}",
+            "location": "={{ $json.location }}",
+            "methane_ppm": "={{ $json.sensors.methane }}",
+            "co_ppm": "={{ $json.sensors.co }}",
+            "temperature_c": "={{ $json.sensors.temperature }}",
+            "pulse_bpm": "={{ $json.sensors.pulseRate }}",
+            "shock_detected": "={{ $json.sensors.shockDetected }}",
+            "emergency_button": "={{ $json.sensors.emergencyButton }}",
+            "alert_count": "={{ $json.alerts.length }}"
+          },
+          "matchingColumns": [],
+          "schema": []
+        },
+        "options": {}
+      },
+      "id": "log-all-readings",
+      "name": "Log All Readings",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4,
+      "position": [920, 800]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": { "caseSensitive": true },
+          "conditions": [
+            {
+              "id": "emergency-check",
+              "leftValue": "={{ $json.sensors.emergencyButton }}",
+              "rightValue": true,
+              "operator": { "type": "boolean", "operation": "equals" }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "check-emergency",
+      "name": "Emergency Button Pressed?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [920, 1000]
+    },
+    {
+      "parameters": {
+        "url": "https://YOUR_ALARM_SYSTEM_API/trigger",
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            { "name": "alarm_type", "value": "EVACUATION" },
+            { "name": "zone", "value": "={{ $json.location }}" },
+            { "name": "miner_id", "value": "={{ $json.minerId }}" },
+            { "name": "timestamp", "value": "={{ $json.timestamp }}" }
+          ]
+        },
+        "options": {}
+      },
+      "id": "trigger-evacuation",
+      "name": "Trigger Evacuation Alarm",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [1160, 950]
+    },
+    {
+      "parameters": {
+        "url": "https://hooks.slack.com/services/YOUR/SLACK/WEBHOOK",
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "text",
+              "value": "=🚨 *EVACUATION TRIGGERED* 🚨\\nMiner *{{ $json.minerId }}* pressed the emergency button!\\nLocation: *{{ $json.location }}*\\nTime: {{ $json.timestamp }}\\n@channel - Immediate response required!"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "slack-evacuation-notify",
+      "name": "Slack Evacuation Notification",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [1160, 1080]
+    },
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "hours",
+              "hoursInterval": 24,
+              "triggerAtHour": 18
+            }
+          ]
+        }
+      },
+      "id": "daily-report-trigger",
+      "name": "Daily Report Trigger (6 PM)",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1,
+      "position": [240, 1200]
+    },
+    {
+      "parameters": {
+        "operation": "read",
+        "documentId": { "mode": "id", "value": "YOUR_GOOGLE_SHEET_ID" },
+        "sheetName": { "mode": "name", "value": "IncidentLog" },
+        "options": {
+          "returnAllMatches": true
+        }
+      },
+      "id": "fetch-daily-incidents",
+      "name": "Fetch Today's Incidents",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4,
+      "position": [460, 1200]
+    },
+    {
+      "parameters": {
+        "jsCode": "const rows = $input.all().map(i => i.json);\nconst today = new Date().toISOString().slice(0, 10);\n\nconst todayRows = rows.filter(r => r.timestamp && r.timestamp.startsWith(today));\nconst critical = todayRows.filter(r => r.severity === 'CRITICAL').length;\nconst warnings = todayRows.filter(r => r.severity === 'WARNING').length;\nconst emergencies = todayRows.filter(r => r.emergency_button === 'true' || r.emergency_button === true).length;\nconst shocks = todayRows.filter(r => r.shock_detected === 'true' || r.shock_detected === true).length;\n\nconst uniqueMiners = [...new Set(todayRows.map(r => r.miner_id))];\n\nconst report = `\n===== DAILY SAFETY REPORT =====\nDate: ${today}\nGenerated: ${new Date().toISOString()}\n\nSUMMARY\n-------\nTotal Events Today: ${todayRows.length}\nCritical Incidents: ${critical}\nWarning Alerts: ${warnings}\nEmergency Button Activations: ${emergencies}\nShock/Fall Events: ${shocks}\nMiners Monitored: ${uniqueMiners.length} (${uniqueMiners.join(', ')})\n\nACTION REQUIRED: ${critical > 0 ? 'YES - ' + critical + ' critical incidents need review' : 'None'}\n\nPlease review the full incident log in Google Sheets for details.\n================================\n`;\n\nreturn [{ json: { report, date: today, critical, warnings, totalEvents: todayRows.length } }];"
+      },
+      "id": "generate-daily-report",
+      "name": "Generate Daily Report",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [700, 1200]
+    },
+    {
+      "parameters": {
+        "fromEmail": "reports@minersafety.com",
+        "toEmail": "management@miningcompany.com",
+        "subject": "=Daily Safety Report - {{ $json.date }} | {{ $json.critical }} Critical, {{ $json.warnings }} Warnings",
+        "emailType": "text",
+        "text": "={{ $json.report }}",
+        "options": {}
+      },
+      "id": "send-daily-report",
+      "name": "Send Daily Report Email",
+      "type": "n8n-nodes-base.emailSend",
+      "typeVersion": 2,
+      "position": [940, 1200]
+    }
+  ],
+  "connections": {
+    "Helmet Data Webhook": {
+      "main": [
+        [
+          { "node": "Acknowledge Receipt", "type": "main", "index": 0 },
+          { "node": "Parse & Evaluate Sensor Data", "type": "main", "index": 0 }
+        ]
+      ]
+    },
+    "Parse & Evaluate Sensor Data": {
+      "main": [
+        [
+          { "node": "Is Critical Alert?", "type": "main", "index": 0 },
+          { "node": "Is Warning Alert?", "type": "main", "index": 0 },
+          { "node": "Log All Readings", "type": "main", "index": 0 },
+          { "node": "Emergency Button Pressed?", "type": "main", "index": 0 }
+        ]
+      ]
+    },
+    "Is Critical Alert?": {
+      "main": [
+        [{ "node": "Format Critical Alert", "type": "main", "index": 0 }],
+        []
+      ]
+    },
+    "Is Warning Alert?": {
+      "main": [
+        [{ "node": "Format Warning Alert", "type": "main", "index": 0 }],
+        []
+      ]
+    },
+    "Format Critical Alert": {
+      "main": [
+        [
+          { "node": "Send Critical SMS (Twilio)", "type": "main", "index": 0 },
+          { "node": "Send Critical Email", "type": "main", "index": 0 },
+          { "node": "Format Incident Log", "type": "main", "index": 0 }
+        ]
+      ]
+    },
+    "Format Warning Alert": {
+      "main": [
+        [
+          { "node": "Send Warning SMS (Twilio)", "type": "main", "index": 0 },
+          { "node": "Send Warning Email", "type": "main", "index": 0 },
+          { "node": "Format Incident Log", "type": "main", "index": 0 }
+        ]
+      ]
+    },
+    "Format Incident Log": {
+      "main": [
+        [{ "node": "Log to Google Sheets", "type": "main", "index": 0 }]
+      ]
+    },
+    "Emergency Button Pressed?": {
+      "main": [
+        [
+          { "node": "Trigger Evacuation Alarm", "type": "main", "index": 0 },
+          { "node": "Slack Evacuation Notification", "type": "main", "index": 0 }
+        ],
+        []
+      ]
+    },
+    "Daily Report Trigger (6 PM)": {
+      "main": [
+        [{ "node": "Fetch Today's Incidents", "type": "main", "index": 0 }]
+      ]
+    },
+    "Fetch Today's Incidents": {
+      "main": [
+        [{ "node": "Generate Daily Report", "type": "main", "index": 0 }]
+      ]
+    },
+    "Generate Daily Report": {
+      "main": [
+        [{ "node": "Send Daily Report Email", "type": "main", "index": 0 }]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "staticData": null,
+  "tags": ["mining-safety", "iot", "arduino"],
+  "meta": {
+    "templateCredsSetupCompleted": false
+  }
+}
